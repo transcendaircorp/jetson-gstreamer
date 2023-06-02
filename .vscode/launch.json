@@ -8,10 +8,10 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug",
-      "program": "${workspaceFolder}/build/stream",
+      "program": "${workspaceFolder}/build/gstreamer",
       "args": [],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "make: build"
+      "preLaunchTask": "CMake: build"
     }
   ]
 }

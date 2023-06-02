@@ -1,0 +1,362 @@
+#include <algorithm>
+#include <arpa/inet.h>
+#include <fstream>
+#include <gst/gst.h>
+#include <iostream>
+#include <netinet/in.h>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+std::string string_join(const std::vector<std::string> &strings, const std::string &delimiter) {
+  std::string result;
+  for (const auto &string : strings)
+    result += string + delimiter;
+  return result.substr(0, result.length() - delimiter.length());
+}
+
+struct Client {
+  sockaddr_in addr;
+  Client(std::string ip, int port) {
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_aton(ip.c_str(), &addr.sin_addr);
+  }
+  std::string toString() {
+    char ip[20];
+    inet_ntop(AF_INET, &addr.sin_addr, ip, 20);
+    return std::string(ip) + ":" + std::to_string(ntohs(addr.sin_port));
+  }
+  bool operator==(const Client &other) const {
+    return addr.sin_addr.s_addr == other.addr.sin_addr.s_addr && addr.sin_port == other.addr.sin_port;
+  }
+};
+
+class CameraData {
+public:
+  // Parse video from webcam
+  GstElement *pipeline = NULL;
+  GstElement *source = NULL;
+  GstElement *sourceFilter = NULL;
+  GstElement *videoTee = NULL;
+  // Fake sink
+  GstElement *fakesink = NULL;
+  // Send video to file
+  GstPad *teeRecordPad = NULL;
+  GstElement *recordQueue = NULL;
+  GstElement *fileSink = NULL;
+  // Send video to network
+  GstPad *teeRTPPad = NULL;
+  GstElement *rtpQueue = NULL;
+  GstElement *rtpPay = NULL;
+  GstElement *identity = NULL;
+  GstElement *udpsink = NULL;
+  // Clients
+  std::vector<Client> clients;
+
+  ~CameraData() {
+    if (pipeline)
+      gst_object_unref(pipeline);
+    if (source)
+      gst_object_unref(source);
+    if (sourceFilter)
+      gst_object_unref(sourceFilter);
+    if (videoTee)
+      gst_object_unref(videoTee);
+    if (fakesink)
+      gst_object_unref(fakesink);
+    if (teeRecordPad)
+      gst_object_unref(teeRecordPad);
+    if (recordQueue)
+      gst_object_unref(recordQueue);
+    if (fileSink)
+      gst_object_unref(fileSink);
+    if (teeRTPPad)
+      gst_object_unref(teeRTPPad);
+    if (rtpQueue)
+      gst_object_unref(rtpQueue);
+    if (rtpPay)
+      gst_object_unref(rtpPay);
+    if (identity)
+      gst_object_unref(identity);
+    if (udpsink)
+      gst_object_unref(udpsink);
+  }
+
+  int init() {
+    pipeline = gst_pipeline_new("pipeline");
+    if (!pipeline)
+      g_printerr("Could not create 'pipeline'");
+    source = gst_element_factory_make("v4l2src", "src");
+    if (!source)
+      g_printerr("Could not create 'v4l2src' element");
+    sourceFilter = gst_element_factory_make("capsfilter", "filter");
+    if (!sourceFilter)
+      g_printerr("Could not create 'capsfilter' element");
+    videoTee = gst_element_factory_make("tee", "tee");
+    if (!videoTee)
+      g_printerr("Could not create 'tee' element");
+    fakesink = gst_element_factory_make("fakesink", "fakesink");
+    if (!fakesink)
+      g_printerr("Could not create 'fakesink' element");
+
+    gst_bin_add_many(GST_BIN(pipeline), source, sourceFilter, videoTee, fakesink, NULL);
+    if (!gst_element_link_many(source, sourceFilter, videoTee, NULL)) {
+      g_printerr("Failed to link source");
+      return -1;
+    }
+    GstPad *teePad = gst_element_get_request_pad(videoTee, "src_%u");
+    GstPad *sinkPad = gst_element_get_static_pad(fakesink, "sink");
+    if (gst_pad_link(teePad, sinkPad) != GST_PAD_LINK_OK) {
+      g_printerr("Failed to link tee and fakesink");
+      return -1;
+    }
+    gst_object_unref(sinkPad);
+
+    recordQueue = gst_element_factory_make("queue", "recordQueue");
+    if (!recordQueue)
+      g_printerr("Could not create 'queue' element");
+    fileSink = gst_element_factory_make("filesink", "fileSink");
+    if (!fileSink)
+      g_printerr("Could not create 'filesink' element");
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
+    if (!gst_element_link_many(recordQueue, fileSink, NULL)) {
+      g_error("Failed to link record");
+      return -1;
+    }
+    teeRecordPad = gst_element_get_request_pad(videoTee, "src_%u");
+
+    rtpQueue = gst_element_factory_make("queue", "rtpQueue");
+    if (!rtpQueue)
+      g_printerr("Could not create 'queue' element");
+    rtpPay = gst_element_factory_make("rtpjpegpay", "rtpPay");
+    if (!rtpPay)
+      g_printerr("Could not create 'rtpjpegpay' element");
+    identity = gst_element_factory_make("identity", "identity");
+    if (!identity)
+      g_printerr("Could not create 'identity' element");
+    udpsink = gst_element_factory_make("multiudpsink", "udpSink");
+    if (!udpsink)
+      g_printerr("Could not create 'multiudpsink' element");
+    gst_bin_add_many(GST_BIN(pipeline), rtpQueue, rtpPay, identity, udpsink, NULL);
+    if (!gst_element_link_many(rtpQueue, rtpPay, identity, udpsink, NULL)) {
+      g_error("Failed to link network");
+      return -1;
+    }
+    teeRTPPad = gst_element_get_request_pad(videoTee, "src_%u");
+
+    return !pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
+                   !identity || !udpsink
+               ? -1
+               : 0;
+  }
+  int configure(std::string camera) {
+    g_object_set(G_OBJECT(source), "device", camera.c_str(), NULL);
+    g_object_set(G_OBJECT(source), "io-mode", 2, NULL);
+    GstCaps *filtercaps = gst_caps_new_simple("image/jpeg",                          //
+                                              "width", G_TYPE_INT, 1920,             //
+                                              "height", G_TYPE_INT, 1080,            //
+                                              "framerate", GST_TYPE_FRACTION, 60, 1, //
+                                              "format", G_TYPE_STRING,               //
+                                              "MJPG", NULL);
+    g_object_set(G_OBJECT(sourceFilter), "caps", filtercaps, NULL);
+    gst_caps_unref(filtercaps);
+    
+    g_object_set(G_OBJECT(fileSink), "location", ".tmp", NULL);
+
+    g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
+    g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
+    g_object_set(G_OBJECT(udpsink), "async", false, NULL);
+  }
+
+  // manage pipeline
+  GstStateChangeReturn play() { return gst_element_set_state(pipeline, GST_STATE_PLAYING); }
+  void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
+  int addRTP() {
+    GstPad *queueRTPPad = gst_element_get_static_pad(rtpQueue, "sink");
+    GstPadLinkReturn ret = gst_pad_link(teeRTPPad, queueRTPPad);
+    g_object_unref(queueRTPPad);
+    if (GST_PAD_LINK_FAILED(ret)) {
+      g_printerr("Failed to link tee and queue\n");
+    }
+    return 0;
+  }
+  bool removeRTP() {
+    GstPad *queueRTPPad = gst_element_get_static_pad(rtpQueue, "sink");
+    if(!queueRTPPad){
+      g_printerr("Failed to get queue pad");
+      return false;
+    }
+    gboolean unlinked = gst_pad_unlink(teeRTPPad, queueRTPPad);
+    g_object_unref(queueRTPPad);
+    return unlinked;
+  }
+  int addRecord(std::string filename) {
+    g_object_set(G_OBJECT(fileSink), "location", filename.c_str(), NULL);
+    GstPad *queueRecordPad = gst_element_get_static_pad(recordQueue, "sink");
+    GstPadLinkReturn ret = gst_pad_link(teeRecordPad, queueRecordPad);
+    g_object_unref(queueRecordPad);
+    if (GST_PAD_LINK_FAILED(ret)) {
+      g_printerr("Failed to link tee and queue\n");
+      return -1;
+    }
+    return 0;
+  }
+  bool removeRecord() {
+    GstPad *queueRecordPad = gst_element_get_static_pad(recordQueue, "sink");
+    gboolean unlinked = false;
+    if (queueRecordPad) {
+      unlinked = gst_pad_unlink(teeRecordPad, queueRecordPad);
+      gst_bin_remove_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
+      gst_object_unref(queueRecordPad);
+    }
+    return unlinked;
+  }
+
+  // pipline utils
+  GstBus *getBus() { return gst_element_get_bus(pipeline); }
+
+  // client utils
+  bool addClient(Client client) {
+    // check if client already exists
+    for (auto c : clients)
+      if (c == client)
+        return false;
+    clients.push_back(client);
+    std::string result;
+    for (auto c : clients)
+      result += c.toString() + ",";
+    result.pop_back();
+    if (udpsink)
+      g_object_set(G_OBJECT(udpsink), "clients", result.c_str(), NULL);
+    return true;
+  }
+  bool removeClient(Client client) {
+    auto old_size = clients.size();
+    clients.erase(std::remove(clients.begin(), clients.end(), client), clients.end());
+    return clients.size() != old_size;
+  }
+};
+
+void inputLoop(CameraData *camera) {
+  while (true) {
+    std::string input;
+    std::getline(std::cin, input);
+    std::vector<std::string> args;
+    std::istringstream iss(input);
+    for (std::string s; iss >> s;)
+      args.push_back(s);
+    if (args.size() == 0)
+      continue;
+    std::transform(args[0].begin(), args[0].end(), args[0].begin(), ::tolower);
+    if (args[0] == "help") {
+      std::cout << "Available commands:" << std::endl;
+    } else if (args[0] == "addclient") {
+      if(args.size() != 3){
+        std::cout << "Usage: addclient <ip> <port>" << std::endl;
+        continue;
+      }
+      camera->addClient(Client(args[1], std::stoi(args[2])));
+    } else if (args[0] == "removeclient") {
+      if(args.size() != 3){
+        std::cout << "Usage: removeclient <ip> <port>" << std::endl;
+        continue;
+      }
+      camera->removeClient(Client(args[1], std::stoi(args[2])));
+    } else if (args[0] == "record") {
+      if (args.size() != 2) {
+        std::cout << "Usage: record <filename>" << std::endl;
+        continue;
+      } 
+      // check to make sure filepath is valid
+      std::ofstream file(args[1]);
+      if (!file.good()){
+        std::cout << "Invalid filepath" << std::endl;
+        file.close();
+        continue;
+      }
+      file.close();
+      camera->addRecord(args[1]);
+      continue;
+      camera->addRecord(args[1]);
+    } else if (args[0] == "stoprecord") {
+      camera->removeRecord();
+    } else if (args[0] == "startrtp") {
+      camera->addRTP();
+    } else if (args[0] == "stoprtp") {
+      camera->removeRTP();
+    } else if (args[0] == "exit") {
+      break;
+    } else {
+      std::cout << "Unknown command" << std::endl;
+    }
+  }
+}
+
+int main(int argc, char *argv[]) {
+  CameraData camera;
+  gboolean terminate = false;
+  /* Initialize GStreamer */
+  gst_init(&argc, &argv);
+
+  // start input thread
+  std::thread inputThread(inputLoop, &camera);
+
+  camera.init();
+  camera.configure("/dev/video0");
+  camera.addClient(Client("10.200.10.42", 5000));
+
+  /* Start playing */
+  camera.play();
+
+  /* Wait until error or EOS */
+  GstBus *bus = camera.getBus();
+  do {
+    GstMessage *msg = gst_bus_timed_pop_filtered(
+        bus, GST_CLOCK_TIME_NONE,
+        static_cast<GstMessageType>(GST_MESSAGE_STATE_CHANGED | GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+
+    /* Parse message */
+    if (msg != NULL) {
+      GError *err;
+      gchar *debug_info;
+
+      switch (GST_MESSAGE_TYPE(msg)) {
+      case GST_MESSAGE_ERROR:
+        gst_message_parse_error(msg, &err, &debug_info);
+        g_printerr("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
+        g_printerr("Debugging information: %s\n", debug_info ? debug_info : "none");
+        g_clear_error(&err);
+        g_free(debug_info);
+        terminate = TRUE;
+        break;
+      case GST_MESSAGE_EOS:
+        g_print("End-Of-Stream reached.\n");
+        terminate = TRUE;
+        break;
+      case GST_MESSAGE_STATE_CHANGED:
+        /* We are only interested in state-changed messages from the pipeline */
+        if (GST_MESSAGE_SRC(msg) == GST_OBJECT(camera.pipeline)) {
+          GstState old_state, new_state, pending_state;
+          gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
+          g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
+                  gst_element_state_get_name(new_state));
+        }
+        break;
+      default:
+        /* We should not reach here */
+        g_printerr("Unexpected message received.\n");
+        break;
+      }
+      gst_message_unref(msg);
+    }
+  } while (!terminate);
+
+  /* Free resources */
+  gst_object_unref(bus);
+  camera.stop();
+  delete &camera;
+  inputThread.join();
+  return 0;
+}
