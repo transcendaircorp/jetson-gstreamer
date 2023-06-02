@@ -10,6 +10,10 @@
       "name": "Debug",
       "program": "${workspaceFolder}/build/gstreamer",
       "args": [],
+      "env": {
+        "GST_DEBUG": "3",
+        "GST_DEBUG_DUMP_DOT_DIR": "${workspaceFolder}/graphs",
+      },
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "CMake: build"
     }

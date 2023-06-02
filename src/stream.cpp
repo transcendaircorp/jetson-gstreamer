@@ -117,15 +117,18 @@ public:
     recordQueue = gst_element_factory_make("queue", "recordQueue");
     if (!recordQueue)
       g_printerr("Could not create 'queue' element");
-    fileSink = gst_element_factory_make("filesink", "fileSink");
-    if (!fileSink)
-      g_printerr("Could not create 'filesink' element");
-    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
-    if (!gst_element_link_many(recordQueue, fileSink, NULL)) {
-      g_error("Failed to link record");
-      return -1;
-    }
-    teeRecordPad = gst_element_get_request_pad(videoTee, "src_%u");
+    // fileSink = gst_element_factory_make("fakesink", "fileSink");
+    // if (!fileSink)
+    //   g_printerr("Could not create 'filesink' element");
+    GstElement *temp = gst_element_factory_make("fakesink", "afscasdf");
+    if (!temp)
+      g_printerr("Could not create 'fakesink' element");
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, temp, NULL);
+    // if (!gst_element_link_many(videoTee, fileSink, NULL)) {
+    //   g_error("Failed to link record");
+    //   return -1;
+    // }
+    // teeRecordPad = gst_element_get_request_pad(videoTee, "src_%u");
 
     rtpQueue = gst_element_factory_make("queue", "rtpQueue");
     if (!rtpQueue)
@@ -140,11 +143,11 @@ public:
     if (!udpsink)
       g_printerr("Could not create 'multiudpsink' element");
     gst_bin_add_many(GST_BIN(pipeline), rtpQueue, rtpPay, identity, udpsink, NULL);
-    if (!gst_element_link_many(rtpQueue, rtpPay, identity, udpsink, NULL)) {
+    if (!gst_element_link_many(videoTee, rtpQueue, rtpPay, identity, udpsink, NULL)) {
       g_error("Failed to link network");
       return -1;
     }
-    teeRTPPad = gst_element_get_request_pad(videoTee, "src_%u");
+    // teeRTPPad = gst_element_get_request_pad(videoTee, "src_%u");
 
     return !pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
                    !identity || !udpsink
@@ -158,12 +161,12 @@ public:
                                               "width", G_TYPE_INT, 1920,             //
                                               "height", G_TYPE_INT, 1080,            //
                                               "framerate", GST_TYPE_FRACTION, 60, 1, //
-                                              "format", G_TYPE_STRING,               //
-                                              "MJPG", NULL);
+                                              "format", G_TYPE_STRING, "MJPG",       //
+                                              NULL);
     g_object_set(G_OBJECT(sourceFilter), "caps", filtercaps, NULL);
     gst_caps_unref(filtercaps);
-    
-    g_object_set(G_OBJECT(fileSink), "location", ".tmp", NULL);
+
+    // g_object_set(G_OBJECT(fileSink), "location", ".tmp", NULL);
 
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
     g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
@@ -179,12 +182,13 @@ public:
     g_object_unref(queueRTPPad);
     if (GST_PAD_LINK_FAILED(ret)) {
       g_printerr("Failed to link tee and queue\n");
+      return -1;
     }
     return 0;
   }
   bool removeRTP() {
     GstPad *queueRTPPad = gst_element_get_static_pad(rtpQueue, "sink");
-    if(!queueRTPPad){
+    if (!queueRTPPad) {
       g_printerr("Failed to get queue pad");
       return false;
     }
@@ -253,13 +257,13 @@ void inputLoop(CameraData *camera) {
     if (args[0] == "help") {
       std::cout << "Available commands:" << std::endl;
     } else if (args[0] == "addclient") {
-      if(args.size() != 3){
+      if (args.size() != 3) {
         std::cout << "Usage: addclient <ip> <port>" << std::endl;
         continue;
       }
       camera->addClient(Client(args[1], std::stoi(args[2])));
     } else if (args[0] == "removeclient") {
-      if(args.size() != 3){
+      if (args.size() != 3) {
         std::cout << "Usage: removeclient <ip> <port>" << std::endl;
         continue;
       }
@@ -268,10 +272,10 @@ void inputLoop(CameraData *camera) {
       if (args.size() != 2) {
         std::cout << "Usage: record <filename>" << std::endl;
         continue;
-      } 
+      }
       // check to make sure filepath is valid
       std::ofstream file(args[1]);
-      if (!file.good()){
+      if (!file.good()) {
         std::cout << "Invalid filepath" << std::endl;
         file.close();
         continue;
@@ -294,8 +298,66 @@ void inputLoop(CameraData *camera) {
   }
 }
 
+GMainLoop *loop;
+CameraData camera;
+static gboolean message_cb(GstBus *bus, GstMessage *message, gpointer user_data) {
+  switch (GST_MESSAGE_TYPE(message)) {
+  case GST_MESSAGE_ERROR: {
+    GError *err = NULL;
+    gchar *name, *debug = NULL;
+
+    name = gst_object_get_path_string(message->src);
+    gst_message_parse_error(message, &err, &debug);
+
+    g_printerr("ERROR: from element %s: %s\n", name, err->message);
+    if (debug != NULL)
+      g_printerr("Additional debug info:\n%s\n", debug);
+
+    g_error_free(err);
+    g_free(debug);
+    g_free(name);
+
+    g_main_loop_quit(loop);
+    break;
+  }
+  case GST_MESSAGE_WARNING: {
+    GError *err = NULL;
+    gchar *name, *debug = NULL;
+
+    name = gst_object_get_path_string(message->src);
+    gst_message_parse_warning(message, &err, &debug);
+
+    g_printerr("ERROR: from element %s: %s\n", name, err->message);
+    if (debug != NULL)
+      g_printerr("Additional debug info:\n%s\n", debug);
+
+    g_error_free(err);
+    g_free(debug);
+    g_free(name);
+    break;
+  }
+  case GST_MESSAGE_STATE_CHANGED: {
+    /* We are only interested in state-changed messages from the pipeline */
+    // if (GST_MESSAGE_SRC(message) == GST_OBJECT(camera.pipeline)) {
+      GstState old_state, new_state, pending_state;
+      gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
+      g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
+              gst_element_state_get_name(new_state));
+    // }
+    break;
+  }
+  case GST_MESSAGE_EOS: {
+    g_print("Got EOS\n");
+    g_main_loop_quit(loop);
+    break;
+  }
+  default:
+    break;
+  }
+  return TRUE;
+}
+
 int main(int argc, char *argv[]) {
-  CameraData camera;
   gboolean terminate = false;
   /* Initialize GStreamer */
   gst_init(&argc, &argv);
@@ -305,53 +367,23 @@ int main(int argc, char *argv[]) {
 
   camera.init();
   camera.configure("/dev/video0");
+  // camera.addRTP();
   camera.addClient(Client("10.200.10.42", 5000));
+
+  /* Create the empty pipeline */
+  loop = g_main_loop_new(NULL, FALSE);
+
+  /* Add a bus watch, so we get notified when a message arrives */
+  GstBus *bus = camera.getBus();
+  gst_bus_add_watch(bus, message_cb, NULL);
+  gst_object_unref(bus);
 
   /* Start playing */
   camera.play();
 
-  /* Wait until error or EOS */
-  GstBus *bus = camera.getBus();
-  do {
-    GstMessage *msg = gst_bus_timed_pop_filtered(
-        bus, GST_CLOCK_TIME_NONE,
-        static_cast<GstMessageType>(GST_MESSAGE_STATE_CHANGED | GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
-
-    /* Parse message */
-    if (msg != NULL) {
-      GError *err;
-      gchar *debug_info;
-
-      switch (GST_MESSAGE_TYPE(msg)) {
-      case GST_MESSAGE_ERROR:
-        gst_message_parse_error(msg, &err, &debug_info);
-        g_printerr("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
-        g_printerr("Debugging information: %s\n", debug_info ? debug_info : "none");
-        g_clear_error(&err);
-        g_free(debug_info);
-        terminate = TRUE;
-        break;
-      case GST_MESSAGE_EOS:
-        g_print("End-Of-Stream reached.\n");
-        terminate = TRUE;
-        break;
-      case GST_MESSAGE_STATE_CHANGED:
-        /* We are only interested in state-changed messages from the pipeline */
-        if (GST_MESSAGE_SRC(msg) == GST_OBJECT(camera.pipeline)) {
-          GstState old_state, new_state, pending_state;
-          gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
-          g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
-                  gst_element_state_get_name(new_state));
-        }
-        break;
-      default:
-        /* We should not reach here */
-        g_printerr("Unexpected message received.\n");
-        break;
-      }
-      gst_message_unref(msg);
-    }
-  } while (!terminate);
+  /* Run event loop listening for bus messages until EOS or ERROR */
+  g_print("Starting loop\n");
+  g_main_loop_run(loop);
 
   /* Free resources */
   gst_object_unref(bus);
