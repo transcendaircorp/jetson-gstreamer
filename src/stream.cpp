@@ -40,8 +40,6 @@ public:
   GstElement *source = NULL;
   GstElement *sourceFilter = NULL;
   GstElement *videoTee = NULL;
-  // Fake sink
-  GstElement *fakesink = NULL;
   // Send video to file
   GstPad *teeRecordPad = NULL;
   GstElement *recordQueue = NULL;
@@ -64,8 +62,6 @@ public:
       gst_object_unref(sourceFilter);
     if (videoTee)
       gst_object_unref(videoTee);
-    if (fakesink)
-      gst_object_unref(fakesink);
     if (teeRecordPad)
       gst_object_unref(teeRecordPad);
     if (recordQueue)
@@ -104,9 +100,6 @@ public:
       return -1;
     }
 
-
-
-      
     rtpQueue = gst_element_factory_make("queue", "rtpQueue");
     if (!rtpQueue)
       g_printerr("Could not create 'queue' element");
@@ -124,14 +117,6 @@ public:
       g_error("Failed to link network");
       return -1;
     }
-    
-    teeRTPPad = gst_element_get_request_pad(videoTee, "src_%u");
-    GstPad *sink = gst_element_get_static_pad(rtpQueue, "sink");
-    if (gst_pad_link(teeRTPPad, sink) != GST_PAD_LINK_OK) {
-      g_printerr("Failed to link tee and fakesink");
-      return -1;
-    }
-    gst_object_unref(sink);
 
     recordQueue = gst_element_factory_make("queue", "recordQueue");
     if (!recordQueue)
@@ -139,11 +124,10 @@ public:
     fileSink = gst_element_factory_make("filesink", "fileSink");
     if (!fileSink)
       g_printerr("Could not create 'filesink' element");
-    teeRecordPad = gst_element_get_request_pad(videoTee, "src_%u");
-    // dont link record queue and file sink yet
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
 
     return !pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
-                   !identity || !udpsink
+                   identity || !udpsink
                ? -1
                : 0;
   }
@@ -159,6 +143,8 @@ public:
     g_object_set(G_OBJECT(sourceFilter), "caps", filtercaps, NULL);
     gst_caps_unref(filtercaps);
 
+    g_object_set(G_OBJECT(fileSink), "location", "/dev/null", NULL);
+
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
     g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
     g_object_set(G_OBJECT(udpsink), "async", false, NULL);
@@ -166,31 +152,19 @@ public:
 
   // manage pipeline
   GstStateChangeReturn play() { return gst_element_set_state(pipeline, GST_STATE_PLAYING); }
+  void pause() { gst_element_set_state(pipeline, GST_STATE_PAUSED); }
   void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
   int addRecord(std::string filename) {
+    gst_element_set_state(fileSink, GST_STATE_NULL);
     g_object_set(G_OBJECT(fileSink), "location", filename.c_str(), NULL);
-    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
-    GstPad *queueRecordPad = gst_element_get_static_pad(recordQueue, "sink");
-    GstPadLinkReturn ret = gst_pad_link(teeRecordPad, queueRecordPad);
-    g_object_unref(queueRecordPad);
-    if (GST_PAD_LINK_FAILED(ret)) {
-      g_printerr("Failed to link tee and queue\n");
-      return -1;
-    }
+    gst_element_set_state(fileSink, GST_STATE_PLAYING);
+    gst_element_link_many(videoTee, recordQueue, fileSink, NULL);
+    play();
     return 0;
   }
+
   bool removeRecord() {
-    // GstPad *queueRecordPad = gst_element_get_static_pad(recordQueue, "sink");
-    // gboolean unlinked = false;
-    // if (queueRecordPad) {
-    //   unlinked = gst_pad_unlink(teeRecordPad, queueRecordPad);
-    //   gst_bin_remove_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
-    //   gst_object_unref(queueRecordPad);
-    // }
-    stop();
-    gst_element_unlink_many(videoTee, recordQueue, NULL);
-    gst_bin_remove_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
-    play();
+    gst_element_unlink_many(videoTee, recordQueue, fileSink, NULL);
     return true;
   }
 
@@ -266,10 +240,6 @@ void inputLoop(CameraData *camera) {
       camera->addRecord(args[1]);
     } else if (args[0] == "stoprecord") {
       camera->removeRecord();
-    } else if (args[0] == "startrtp") {
-      // camera->addRTP();
-    } else if (args[0] == "stoprtp") {
-      // camera->removeRTP();
     } else if (args[0] == "exit") {
       break;
     } else {
@@ -318,12 +288,12 @@ static gboolean message_cb(GstBus *bus, GstMessage *message, gpointer user_data)
   }
   case GST_MESSAGE_STATE_CHANGED: {
     /* We are only interested in state-changed messages from the pipeline */
-    // if (GST_MESSAGE_SRC(message) == GST_OBJECT(camera.pipeline)) {
-      GstState old_state, new_state, pending_state;
-      gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
-      g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
-              gst_element_state_get_name(new_state));
-    // }
+    if (GST_MESSAGE_SRC(message) == GST_OBJECT(camera.pipeline)) {
+    GstState old_state, new_state, pending_state;
+    gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
+    g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
+            gst_element_state_get_name(new_state));
+    }
     break;
   }
   case GST_MESSAGE_EOS: {
@@ -348,7 +318,7 @@ int main(int argc, char *argv[]) {
   camera.init();
   camera.configure("/dev/video0");
   camera.addClient(Client("10.200.10.42", 5000));
-  camera.addRecord("/home/jetson/Videos/test.mjpg");
+  // camera.addRecord("/home/jetson/Videos/test.mjpg");
 
   /* Create the empty pipeline */
   loop = g_main_loop_new(NULL, FALSE);
