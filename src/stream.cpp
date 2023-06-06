@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <arpa/inet.h>
+#include <cxxopts.hpp>
+#include <exception>
 #include <fstream>
 #include <gst/gst.h>
 #include <iostream>
 #include <netinet/in.h>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -35,6 +38,12 @@ struct Client {
 
 class CameraData {
 public:
+  // Static options
+  std::string cameraPath;
+  int framerate;
+  int width;
+  int height;
+
   // Parse video from webcam
   GstElement *pipeline = NULL;
   GstElement *source = NULL;
@@ -126,19 +135,19 @@ public:
       g_printerr("Could not create 'filesink' element");
     gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
 
-    return !pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
-                   identity || !udpsink
-               ? -1
-               : 0;
-  }
-  int configure(std::string camera) {
-    g_object_set(G_OBJECT(source), "device", camera.c_str(), NULL);
+    if (!pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
+        !identity || !udpsink) {
+      g_error("Not all elements could be created");
+      return -1;
+    }
+
+    g_object_set(G_OBJECT(source), "device", cameraPath.c_str(), NULL);
     g_object_set(G_OBJECT(source), "io-mode", 2, NULL);
-    GstCaps *filtercaps = gst_caps_new_simple("image/jpeg",                          //
-                                              "width", G_TYPE_INT, 1920,             //
-                                              "height", G_TYPE_INT, 1080,            //
-                                              "framerate", GST_TYPE_FRACTION, 60, 1, //
-                                              "format", G_TYPE_STRING, "MJPG",       //
+    GstCaps *filtercaps = gst_caps_new_simple("image/jpeg",                                 //
+                                              "width", G_TYPE_INT, width,                   //
+                                              "height", G_TYPE_INT, height,                 //
+                                              "framerate", GST_TYPE_FRACTION, framerate, 1, //
+                                              "format", G_TYPE_STRING, "MJPG",              //
                                               NULL);
     g_object_set(G_OBJECT(sourceFilter), "caps", filtercaps, NULL);
     gst_caps_unref(filtercaps);
@@ -148,22 +157,21 @@ public:
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
     g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
     g_object_set(G_OBJECT(udpsink), "async", false, NULL);
+    return 0;
   }
 
   // manage pipeline
   GstStateChangeReturn play() { return gst_element_set_state(pipeline, GST_STATE_PLAYING); }
   void pause() { gst_element_set_state(pipeline, GST_STATE_PAUSED); }
   void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
-  int addRecord(std::string filename) {
+  int startRecord(std::string filename) {
     gst_element_set_state(fileSink, GST_STATE_NULL);
     g_object_set(G_OBJECT(fileSink), "location", filename.c_str(), NULL);
     gst_element_set_state(fileSink, GST_STATE_PLAYING);
     gst_element_link_many(videoTee, recordQueue, fileSink, NULL);
-    play();
     return 0;
   }
-
-  bool removeRecord() {
+  bool stopRecord() {
     gst_element_unlink_many(videoTee, recordQueue, fileSink, NULL);
     return true;
   }
@@ -208,6 +216,8 @@ void inputLoop(CameraData *camera) {
       std::cout << "Available commands:" << std::endl;
     } else if (args[0] == "play") {
       camera->play();
+    } else if (args[0] == "pause") {
+      camera->pause();
     } else if (args[0] == "stop") {
       camera->stop();
     } else if (args[0] == "addclient") {
@@ -235,17 +245,60 @@ void inputLoop(CameraData *camera) {
         continue;
       }
       file.close();
-      camera->addRecord(args[1]);
-      continue;
-      camera->addRecord(args[1]);
+      camera->startRecord(args[1]);
     } else if (args[0] == "stoprecord") {
-      camera->removeRecord();
+      camera->stopRecord();
     } else if (args[0] == "exit") {
       break;
     } else {
       std::cout << "Unknown command" << std::endl;
     }
   }
+}
+
+int parseArgs(cxxopts::ParseResult result, CameraData &camera) {
+  if (result.count("help")) {
+    return 1;
+  }
+  std::string cameraPath;
+  try {
+    cameraPath = result["camera"].as<std::string>();
+  } catch (cxxopts::exceptions::option_has_no_value e) {
+    std::cout << "Camera path required" << std::endl;
+    return 1;
+  }
+  std::ifstream file(cameraPath);
+  if (!file.good()) {
+    std::cout << "Invalid camera path" << std::endl;
+    return 1;
+  }
+  camera.cameraPath = cameraPath;
+
+  std::string resolution;
+  try {
+    resolution = result["resolution"].as<std::string>();
+  } catch (cxxopts::exceptions::option_has_no_value e) {
+    std::cout << "Resolution required" << std::endl;
+    return 1;
+  }
+  std::regex resRegex("([0-9]+)x([0-9]+)");
+  std::smatch resMatch;
+  if (!std::regex_match(resolution, resMatch, resRegex)) {
+    std::cout << "Invalid resolution" << std::endl;
+    return 1;
+  }
+  camera.width = std::stoi(resMatch[1]);
+  camera.height = std::stoi(resMatch[2]);
+
+  int framerate;
+  try {
+    framerate = result["framerate"].as<int>();
+  } catch (cxxopts::exceptions::option_has_no_value e) {
+    std::cout << "Framerate required" << std::endl;
+    return 1;
+  }
+  camera.framerate = framerate;
+  return 0;
 }
 
 GMainLoop *loop;
@@ -289,10 +342,10 @@ static gboolean message_cb(GstBus *bus, GstMessage *message, gpointer user_data)
   case GST_MESSAGE_STATE_CHANGED: {
     /* We are only interested in state-changed messages from the pipeline */
     if (GST_MESSAGE_SRC(message) == GST_OBJECT(camera.pipeline)) {
-    GstState old_state, new_state, pending_state;
-    gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
-    g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
-            gst_element_state_get_name(new_state));
+      GstState old_state, new_state, pending_state;
+      gst_message_parse_state_changed(message, &old_state, &new_state, &pending_state);
+      g_print("Pipeline state changed from %s to %s:\n", gst_element_state_get_name(old_state),
+              gst_element_state_get_name(new_state));
     }
     break;
   }
@@ -308,20 +361,30 @@ static gboolean message_cb(GstBus *bus, GstMessage *message, gpointer user_data)
 }
 
 int main(int argc, char *argv[]) {
-  gboolean terminate = false;
+  cxxopts::Options options("cam2rtpfile",
+                           "Takes a camera input and streams it over udp with rtp encoding, and records to a file");
+  options.add_options()                                                                                  //
+      ("c,camera", "Path to camera device, i.e. /dev/video0", cxxopts::value<std::string>())             //
+      ("f,framerate", "Framerate for the video source", cxxopts::value<int>())                           //
+      ("r,resolution", "Resolution for the video source, i.e. 1920x1080", cxxopts::value<std::string>()) //
+      ("a,address", "List of udp addresses for stream, i.e. 10.0.0.1:1924,10.0.0.2:1925")                //
+      ("h,help", "Print this help message");
+  auto result = options.parse(argc, argv);
+  if (parseArgs(result, camera)) {
+    std::cout << options.help() << std::endl;
+    return 1;
+  }
+
   /* Initialize GStreamer */
   gst_init(&argc, &argv);
+
+  /* Create the empty pipeline */
+  loop = g_main_loop_new(NULL, FALSE);
 
   // start input thread
   std::thread inputThread(inputLoop, &camera);
 
   camera.init();
-  camera.configure("/dev/video0");
-  camera.addClient(Client("10.200.10.42", 5000));
-  // camera.addRecord("/home/jetson/Videos/test.mjpg");
-
-  /* Create the empty pipeline */
-  loop = g_main_loop_new(NULL, FALSE);
 
   /* Add a bus watch, so we get notified when a message arrives */
   GstBus *bus = camera.getBus();

@@ -8,8 +8,15 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug",
-      "program": "${workspaceFolder}/build/gstreamer",
-      "args": [],
+      "program": "${workspaceFolder}/build/cam2rtpfile",
+      "args": [
+        "-c",
+        "/dev/video0",
+        "-f",
+        "60",
+        "-r",
+        "1920x1080",
+      ],
       "env": {
         "GST_DEBUG": "3",
         "GST_DEBUG_DUMP_DOT_DIR": "${workspaceFolder}/graphs",
