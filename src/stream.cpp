@@ -49,20 +49,21 @@ public:
   GstElement *source = NULL;
   GstElement *sourceFilter = NULL;
   GstElement *videoTee = NULL;
-  // Send video to file
-  GstPad *teeRecordPad = NULL;
-  GstElement *recordQueue = NULL;
-  GstElement *fileSink = NULL;
   // Send video to network
-  GstPad *teeRTPPad = NULL;
   GstElement *rtpQueue = NULL;
   GstElement *rtpPay = NULL;
   GstElement *identity = NULL;
   GstElement *udpsink = NULL;
+  // Send video to file
+  GstElement *recordQueue = NULL;
+  GstElement *jpegEnc = NULL;
+  GstElement *aviMux = NULL;
+  GstElement *fileSink = NULL;
   // Clients
   std::vector<Client> clients;
 
   ~CameraData() {
+    // release source
     if (pipeline)
       gst_object_unref(pipeline);
     if (source)
@@ -71,14 +72,8 @@ public:
       gst_object_unref(sourceFilter);
     if (videoTee)
       gst_object_unref(videoTee);
-    if (teeRecordPad)
-      gst_object_unref(teeRecordPad);
-    if (recordQueue)
-      gst_object_unref(recordQueue);
-    if (fileSink)
-      gst_object_unref(fileSink);
-    if (teeRTPPad)
-      gst_object_unref(teeRTPPad);
+
+    // release rtp stream
     if (rtpQueue)
       gst_object_unref(rtpQueue);
     if (rtpPay)
@@ -87,6 +82,17 @@ public:
       gst_object_unref(identity);
     if (udpsink)
       gst_object_unref(udpsink);
+
+    // release file sink
+
+    if (recordQueue)
+      gst_object_unref(recordQueue);
+    if (jpegEnc)
+      gst_object_unref(jpegEnc);
+    if (aviMux)
+      gst_object_unref(aviMux);
+    if (fileSink)
+      gst_object_unref(fileSink);
   }
 
   int init() {
@@ -130,13 +136,23 @@ public:
     recordQueue = gst_element_factory_make("queue", "recordQueue");
     if (!recordQueue)
       g_printerr("Could not create 'queue' element");
+    jpegEnc = gst_element_factory_make("jpegenc", "jpegEnc");
+    if (!jpegEnc)
+      g_printerr("Could not create 'jpegenc' element");
+    aviMux = gst_element_factory_make("avimux", "aviMux");
+    if (!aviMux)
+      g_printerr("Could not create 'avimux' element");
     fileSink = gst_element_factory_make("filesink", "fileSink");
     if (!fileSink)
       g_printerr("Could not create 'filesink' element");
-    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, jpegEnc, aviMux, fileSink, NULL);
+    if (!gst_element_link_many(recordQueue, jpegEnc, aviMux, fileSink, NULL)) {
+      g_error("Failed to link file");
+      return -1;
+    }
 
-    if (!pipeline || !source || !sourceFilter || !videoTee || !recordQueue || !fileSink || !rtpQueue || !rtpPay ||
-        !identity || !udpsink) {
+    if (!pipeline || !source || !sourceFilter || !videoTee || !rtpQueue || !rtpPay || !identity || !udpsink ||
+        !recordQueue || !jpegEnc || !aviMux || !fileSink) {
       g_error("Not all elements could be created");
       return -1;
     }
@@ -155,8 +171,11 @@ public:
     g_object_set(G_OBJECT(fileSink), "location", "/dev/null", NULL);
 
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
+    g_object_set(G_OBJECT(udpsink), "auto-multicast", true, NULL);
+    g_object_set(G_OBJECT(udpsink), "port", 5000, NULL);
     g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
     g_object_set(G_OBJECT(udpsink), "async", false, NULL);
+    updateClients();
     return 0;
   }
 
@@ -166,13 +185,13 @@ public:
   void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
   int startRecord(std::string filename) {
     gst_element_set_state(fileSink, GST_STATE_NULL);
-    g_object_set(G_OBJECT(fileSink), "location", filename.c_str(), NULL);
+    g_object_set(G_OBJECT(fileSink), "location", filename.append(".avi").c_str(), NULL);
     gst_element_set_state(fileSink, GST_STATE_PLAYING);
-    gst_element_link_many(videoTee, recordQueue, fileSink, NULL);
+    gst_element_link_many(videoTee, recordQueue, NULL);
     return 0;
   }
   bool stopRecord() {
-    gst_element_unlink_many(videoTee, recordQueue, fileSink, NULL);
+    gst_element_unlink_many(videoTee, recordQueue, NULL);
     return true;
   }
 
@@ -186,18 +205,26 @@ public:
       if (c == client)
         return false;
     clients.push_back(client);
+    updateClients();
+    return true;
+  }
+  bool removeClient(Client client) {
+    auto old_size = clients.size();
+    clients.erase(std::remove(clients.begin(), clients.end(), client), clients.end());
+    auto changed = clients.size() != old_size;
+    if (changed)
+      updateClients();
+    return changed;
+  }
+
+private:
+  void updateClients() {
     std::string result;
     for (auto c : clients)
       result += c.toString() + ",";
     result.pop_back();
     if (udpsink)
       g_object_set(G_OBJECT(udpsink), "clients", result.c_str(), NULL);
-    return true;
-  }
-  bool removeClient(Client client) {
-    auto old_size = clients.size();
-    clients.erase(std::remove(clients.begin(), clients.end(), client), clients.end());
-    return clients.size() != old_size;
   }
 };
 
@@ -384,6 +411,7 @@ int main(int argc, char *argv[]) {
   // start input thread
   std::thread inputThread(inputLoop, &camera);
 
+  camera.addClient(Client("239.200.10.37", 5000));
   camera.init();
 
   /* Add a bus watch, so we get notified when a message arrives */

@@ -42,6 +42,13 @@
     "chrono": "cpp",
     "ctime": "cpp",
     "ratio": "cpp",
-    "thread": "cpp"
+    "thread": "cpp",
+    "bitset": "cpp",
+    "cstring": "cpp",
+    "unordered_set": "cpp",
+    "iterator": "cpp",
+    "map": "cpp",
+    "regex": "cpp",
+    "cinttypes": "cpp"
   }
 }
