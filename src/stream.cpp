@@ -172,7 +172,6 @@ public:
 
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
     g_object_set(G_OBJECT(udpsink), "auto-multicast", true, NULL);
-    g_object_set(G_OBJECT(udpsink), "port", 5000, NULL);
     g_object_set(G_OBJECT(udpsink), "sync", false, NULL);
     g_object_set(G_OBJECT(udpsink), "async", false, NULL);
     updateClients();
