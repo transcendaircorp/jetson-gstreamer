@@ -56,8 +56,8 @@ public:
   GstElement *udpsink = NULL;
   // Send video to file
   GstElement *recordQueue = NULL;
-  GstElement *jpegEnc = NULL;
-  GstElement *aviMux = NULL;
+  // GstElement *jpegEnc = NULL;
+  // GstElement *aviMux = NULL;
   GstElement *fileSink = NULL;
   // Clients
   std::vector<Client> clients;
@@ -87,10 +87,10 @@ public:
 
     if (recordQueue)
       gst_object_unref(recordQueue);
-    if (jpegEnc)
-      gst_object_unref(jpegEnc);
-    if (aviMux)
-      gst_object_unref(aviMux);
+    // if (jpegEnc)
+    //   gst_object_unref(jpegEnc);
+    // if (aviMux)
+    //   gst_object_unref(aviMux);
     if (fileSink)
       gst_object_unref(fileSink);
   }
@@ -136,23 +136,23 @@ public:
     recordQueue = gst_element_factory_make("queue", "recordQueue");
     if (!recordQueue)
       g_printerr("Could not create 'queue' element");
-    jpegEnc = gst_element_factory_make("jpegenc", "jpegEnc");
-    if (!jpegEnc)
-      g_printerr("Could not create 'jpegenc' element");
-    aviMux = gst_element_factory_make("avimux", "aviMux");
-    if (!aviMux)
-      g_printerr("Could not create 'avimux' element");
+    // jpegEnc = gst_element_factory_make("jpegenc", "jpegEnc");
+    // if (!jpegEnc)
+    //   g_printerr("Could not create 'jpegenc' element");
+    // aviMux = gst_element_factory_make("avimux", "aviMux");
+    // if (!aviMux)
+    //   g_printerr("Could not create 'avimux' element");
     fileSink = gst_element_factory_make("filesink", "fileSink");
     if (!fileSink)
       g_printerr("Could not create 'filesink' element");
-    gst_bin_add_many(GST_BIN(pipeline), recordQueue, jpegEnc, aviMux, fileSink, NULL);
-    if (!gst_element_link_many(recordQueue, jpegEnc, aviMux, fileSink, NULL)) {
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
+    if (!gst_element_link_many(recordQueue, fileSink, NULL)) {
       g_error("Failed to link file");
       return -1;
     }
 
     if (!pipeline || !source || !sourceFilter || !videoTee || !rtpQueue || !rtpPay || !identity || !udpsink ||
-        !recordQueue || !jpegEnc || !aviMux || !fileSink) {
+        !recordQueue || /*!jpegEnc || !aviMux ||*/ !fileSink) {
       g_error("Not all elements could be created");
       return -1;
     }
@@ -190,6 +190,7 @@ public:
     return 0;
   }
   bool stopRecord() {
+    // send eos to avimux
     gst_element_unlink_many(videoTee, recordQueue, NULL);
     return true;
   }
@@ -264,7 +265,7 @@ void inputLoop(CameraData *camera) {
         continue;
       }
       // check to make sure filepath is valid
-      std::ofstream file(args[1]);
+      std::ofstream file(args[1] + ".avi");
       if (!file.good()) {
         std::cout << "Invalid filepath" << std::endl;
         file.close();
@@ -292,6 +293,9 @@ int parseArgs(cxxopts::ParseResult result, CameraData &camera) {
   } catch (cxxopts::exceptions::option_has_no_value e) {
     std::cout << "Camera path required" << std::endl;
     return 1;
+  } catch (cxxopts::exceptions::exception e) {
+    std::cout << e.what() << std::endl;
+    return 1;
   }
   std::ifstream file(cameraPath);
   if (!file.good()) {
@@ -306,11 +310,14 @@ int parseArgs(cxxopts::ParseResult result, CameraData &camera) {
   } catch (cxxopts::exceptions::option_has_no_value e) {
     std::cout << "Resolution required" << std::endl;
     return 1;
+  } catch (cxxopts::exceptions::exception e) {
+    std::cout << e.what() << std::endl;
+    return 1;
   }
   std::regex resRegex("([0-9]+)x([0-9]+)");
   std::smatch resMatch;
   if (!std::regex_match(resolution, resMatch, resRegex)) {
-    std::cout << "Invalid resolution" << std::endl;
+    std::cout << "Invalid resolution format" << std::endl;
     return 1;
   }
   camera.width = std::stoi(resMatch[1]);
@@ -322,8 +329,29 @@ int parseArgs(cxxopts::ParseResult result, CameraData &camera) {
   } catch (cxxopts::exceptions::option_has_no_value e) {
     std::cout << "Framerate required" << std::endl;
     return 1;
+  } catch (cxxopts::exceptions::exception e) {
+    std::cout << e.what() << std::endl;
+    return 1;
   }
   camera.framerate = framerate;
+
+  std::vector<std::string> clients;
+  try {
+    clients = result["address"].as<std::vector<std::string>>();
+  } catch (cxxopts::exceptions::option_has_no_value e) {
+  } catch (cxxopts::exceptions::exception e) {
+    std::cout << e.what() << std::endl;
+    return 1;
+  }
+  for (auto const client : clients) {
+    std::regex clientRegex("([0-9]{1,3}(?:\\.[0-9]{1,3}){3}):([0-9]+)");
+    std::smatch clientMatch;
+    if (!std::regex_match(client, clientMatch, clientRegex)) {
+      std::cout << "Invalid client: " << client << std::endl;
+      return 1;
+    }
+    camera.addClient(Client(clientMatch[1], std::stoi(clientMatch[2])));
+  }
   return 0;
 }
 
@@ -388,16 +416,23 @@ static gboolean message_cb(GstBus *bus, GstMessage *message, gpointer user_data)
 
 int main(int argc, char *argv[]) {
   cxxopts::Options options("cam2rtpfile",
-                           "Takes a camera input and streams it over udp with rtp encoding, and records to a file");
+                           "Takes a camera input and streams it over udp with rtp, and optionally records to a file");
   options.add_options()                                                                                  //
       ("c,camera", "Path to camera device, i.e. /dev/video0", cxxopts::value<std::string>())             //
       ("f,framerate", "Framerate for the video source", cxxopts::value<int>())                           //
       ("r,resolution", "Resolution for the video source, i.e. 1920x1080", cxxopts::value<std::string>()) //
-      ("a,address", "List of udp addresses for stream, i.e. 10.0.0.1:1924,10.0.0.2:1925")                //
+      ("a,address",
+       "List of udp addresses for stream, i.e. 10.0.0.1:1924,10.0.0.2:1925. Can be added and removed later.",
+       cxxopts::value<std::vector<std::string>>()) //
       ("h,help", "Print this help message");
-  auto result = options.parse(argc, argv);
-  if (parseArgs(result, camera)) {
-    std::cout << options.help() << std::endl;
+  try {
+    auto result = options.parse(argc, argv);
+    if (parseArgs(result, camera)) {
+      std::cout << std::endl << options.help() << std::endl;
+      return 1;
+    }
+  } catch (cxxopts::exceptions::parsing e) {
+    std::cout << e.what() << std::endl << std::endl << options.help() << std::endl;
     return 1;
   }
 
@@ -410,7 +445,6 @@ int main(int argc, char *argv[]) {
   // start input thread
   std::thread inputThread(inputLoop, &camera);
 
-  camera.addClient(Client("239.200.10.37", 5000));
   camera.init();
 
   /* Add a bus watch, so we get notified when a message arrives */
