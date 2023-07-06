@@ -184,7 +184,7 @@ public:
   void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
   int startRecord(std::string filename) {
     gst_element_set_state(fileSink, GST_STATE_NULL);
-    g_object_set(G_OBJECT(fileSink), "location", filename.append(".avi").c_str(), NULL);
+    g_object_set(G_OBJECT(fileSink), "location", filename.append(".mjpg").c_str(), NULL);
     gst_element_set_state(fileSink, GST_STATE_PLAYING);
     gst_element_link_many(videoTee, recordQueue, NULL);
     return 0;
@@ -265,7 +265,7 @@ void inputLoop(CameraData *camera) {
         continue;
       }
       // check to make sure filepath is valid
-      std::ofstream file(args[1] + ".avi");
+      std::ofstream file(args[1] + ".mjpg");
       if (!file.good()) {
         std::cout << "Invalid filepath" << std::endl;
         file.close();
