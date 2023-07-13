@@ -16,7 +16,7 @@
 #include <Ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
 #define NULL_FILE "nul"
-#define VIDEO_SOUCE "mfvideosrc"
+#define VIDEO_SOURCE "mfvideosrc"
 #elif __linux__
 #define OS_LINUX 1
 #include <arpa/inet.h>
@@ -114,9 +114,9 @@ public:
     pipeline = gst_pipeline_new("pipeline");
     if (!pipeline)
       g_printerr("Could not create 'pipeline'");
-    source = gst_element_factory_make(VIDEO_SOUCE, "videosrc");
+    source = gst_element_factory_make(VIDEO_SOURCE, "videosrc");
     if (!source)
-        g_printerr("Could not create '" VIDEO_SOUCE "' element");
+        g_printerr("Could not create '" VIDEO_SOURCE "' element");
     sourceFilter = gst_element_factory_make("capsfilter", "filter");
     if (!sourceFilter)
       g_printerr("Could not create 'capsfilter' element");
