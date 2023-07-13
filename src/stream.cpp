@@ -1,16 +1,30 @@
 #include <algorithm>
-#include <arpa/inet.h>
 #include <cxxopts.hpp>
 #include <exception>
 #include <fstream>
 #include <gst/gst.h>
 #include <iostream>
-#include <netinet/in.h>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#define OS_WINDOWS 1
+#include <Ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#define NULL_FILE "nul"
+#define VIDEO_SOUCE "mfvideosrc"
+#elif __linux__
+#define OS_LINUX 1
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#define NULL_FILE "/dev/null"
+#define VIDEO_SOURCE "v4l2src"
+#else
+#error "Unknown compiler"
+#endif
 
 std::string string_join(const std::vector<std::string> &strings, const std::string &delimiter) {
   std::string result;
@@ -24,11 +38,11 @@ struct Client {
   Client(std::string ip, int port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_aton(ip.c_str(), &addr.sin_addr);
+    inet_pton(addr.sin_family, ip.c_str(), &addr.sin_addr);
   }
   std::string toString() {
     char ip[20];
-    inet_ntop(AF_INET, &addr.sin_addr, ip, 20);
+    inet_ntop(addr.sin_family, &addr.sin_addr, ip, 20);
     return std::string(ip) + ":" + std::to_string(ntohs(addr.sin_port));
   }
   bool operator==(const Client &other) const {
@@ -99,9 +113,9 @@ public:
     pipeline = gst_pipeline_new("pipeline");
     if (!pipeline)
       g_printerr("Could not create 'pipeline'");
-    source = gst_element_factory_make("v4l2src", "src");
+    source = gst_element_factory_make(VIDEO_SOUCE, "videosrc");
     if (!source)
-      g_printerr("Could not create 'v4l2src' element");
+        g_printerr("Could not create '" VIDEO_SOUCE "' element");
     sourceFilter = gst_element_factory_make("capsfilter", "filter");
     if (!sourceFilter)
       g_printerr("Could not create 'capsfilter' element");
@@ -156,9 +170,12 @@ public:
       g_error("Not all elements could be created");
       return -1;
     }
-
+#ifdef OS_LINUX
     g_object_set(G_OBJECT(source), "device", cameraPath.c_str(), NULL);
     g_object_set(G_OBJECT(source), "io-mode", 2, NULL);
+#elif OS_WINDOWS
+    g_object_set(G_OBJECT(source), "device-path", cameraPath.c_str(), NULL);
+#endif
     GstCaps *filtercaps = gst_caps_new_simple("image/jpeg",                                 //
                                               "width", G_TYPE_INT, width,                   //
                                               "height", G_TYPE_INT, height,                 //
@@ -168,7 +185,7 @@ public:
     g_object_set(G_OBJECT(sourceFilter), "caps", filtercaps, NULL);
     gst_caps_unref(filtercaps);
 
-    g_object_set(G_OBJECT(fileSink), "location", "/dev/null", NULL);
+    g_object_set(G_OBJECT(fileSink), "location", NULL_FILE, NULL);
 
     g_object_set(G_OBJECT(identity), "drop-allocation", 1, NULL);
     g_object_set(G_OBJECT(udpsink), "auto-multicast", true, NULL);
@@ -190,7 +207,9 @@ public:
     return 0;
   }
   bool stopRecord() {
-    // send eos to avimux
+    gst_element_set_state(fileSink, GST_STATE_NULL);
+    g_object_set(G_OBJECT(fileSink), "location", NULL_FILE, NULL);
+    gst_element_set_state(fileSink, GST_STATE_PLAYING);
     gst_element_unlink_many(videoTee, recordQueue, NULL);
     return true;
   }
@@ -295,11 +314,6 @@ int parseArgs(cxxopts::ParseResult result, CameraData &camera) {
     return 1;
   } catch (cxxopts::exceptions::exception e) {
     std::cout << e.what() << std::endl;
-    return 1;
-  }
-  std::ifstream file(cameraPath);
-  if (!file.good()) {
-    std::cout << "Invalid camera path" << std::endl;
     return 1;
   }
   camera.cameraPath = cameraPath;
