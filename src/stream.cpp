@@ -3,6 +3,7 @@
 #include <exception>
 #include <fstream>
 #include <gst/gst.h>
+#include <iomanip>
 #include <iostream>
 #include <regex>
 #include <sstream>
@@ -71,7 +72,7 @@ public:
   // Send video to file
   GstElement *recordQueue = NULL;
   // GstElement *jpegEnc = NULL;
-  // GstElement *aviMux = NULL;
+  GstElement *mkvMux = NULL;
   GstElement *fileSink = NULL;
   // Clients
   std::vector<Client> clients;
@@ -153,20 +154,20 @@ public:
     // jpegEnc = gst_element_factory_make("jpegenc", "jpegEnc");
     // if (!jpegEnc)
     //   g_printerr("Could not create 'jpegenc' element");
-    // aviMux = gst_element_factory_make("avimux", "aviMux");
-    // if (!aviMux)
-    //   g_printerr("Could not create 'avimux' element");
+    mkvMux = gst_element_factory_make("matroskamux", "matroskamux");
+    if (!mkvMux)
+      g_printerr("Could not create 'matroskamux' element");
     fileSink = gst_element_factory_make("filesink", "fileSink");
     if (!fileSink)
       g_printerr("Could not create 'filesink' element");
-    gst_bin_add_many(GST_BIN(pipeline), recordQueue, fileSink, NULL);
-    if (!gst_element_link_many(recordQueue, fileSink, NULL)) {
+    gst_bin_add_many(GST_BIN(pipeline), recordQueue, mkvMux, fileSink, NULL);
+    if (!gst_element_link_many(recordQueue, mkvMux, fileSink, NULL)) {
       g_error("Failed to link file");
       return -1;
     }
 
     if (!pipeline || !source || !sourceFilter || !videoTee || !rtpQueue || !rtpPay || !identity || !udpsink ||
-        !recordQueue || /*!jpegEnc || !aviMux ||*/ !fileSink) {
+        !recordQueue || /*!jpegEnc ||*/ !mkvMux || !fileSink) {
       g_error("Not all elements could be created");
       return -1;
     }
@@ -201,15 +202,19 @@ public:
   void stop() { gst_element_set_state(pipeline, GST_STATE_NULL); }
   int startRecord(std::string filename) {
     gst_element_set_state(fileSink, GST_STATE_NULL);
-    g_object_set(G_OBJECT(fileSink), "location", filename.append(".mjpg").c_str(), NULL);
+    gst_element_set_state(mkvMux, GST_STATE_NULL);
+    g_object_set(G_OBJECT(fileSink), "location", filename.append(".mkv").c_str(), NULL);
     gst_element_set_state(fileSink, GST_STATE_PLAYING);
+    gst_element_set_state(mkvMux, GST_STATE_PLAYING);
     gst_element_link_many(videoTee, recordQueue, NULL);
     return 0;
   }
   bool stopRecord() {
     gst_element_set_state(fileSink, GST_STATE_NULL);
+    gst_element_set_state(mkvMux, GST_STATE_NULL);
     g_object_set(G_OBJECT(fileSink), "location", NULL_FILE, NULL);
     gst_element_set_state(fileSink, GST_STATE_PLAYING);
+    gst_element_set_state(mkvMux, GST_STATE_PLAYING);
     gst_element_unlink_many(videoTee, recordQueue, NULL);
     return true;
   }
@@ -253,7 +258,7 @@ void inputLoop(CameraData *camera) {
     std::getline(std::cin, input);
     std::vector<std::string> args;
     std::istringstream iss(input);
-    for (std::string s; iss >> s;)
+    for (std::string s; iss >> std::quoted(s);)
       args.push_back(s);
     if (args.size() == 0)
       continue;
@@ -284,7 +289,7 @@ void inputLoop(CameraData *camera) {
         continue;
       }
       // check to make sure filepath is valid
-      std::ofstream file(args[1] + ".mjpg");
+      std::ofstream file(args[1] + ".mkv");
       if (!file.good()) {
         std::cout << "Invalid filepath" << std::endl;
         file.close();
