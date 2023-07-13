@@ -4,7 +4,7 @@ Code for running gstreamer on the jetson nano, which supports very low latency v
 ## Build Process
 
 ### Linux
-`sudo apt install cmake libgstreamer1.0-dev libgstreamer-plugins-good1.0-dev`  
+`sudo apt install cmake build-essential libgstreamer1.0-dev libgstreamer-plugins-good1.0-dev`  
 `cmake . && make`  
 Output executable is `cam2rtpfile`
 
